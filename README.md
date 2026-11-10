@@ -62,7 +62,8 @@
 
 rustup 內建的 mingw 只有精簡版 `ld`，所以專案做了這些調整：
 
-- `.cargo/config.toml`：編譯輸出放在純英文路徑（`ld` 不支援中文路徑）。
+- `ld` 不支援中文路徑：`build.ps1` 偵測到專案路徑含非英文字元時，會自動把編譯輸出放到 `%LOCALAPPDATA%\quick-exit-target`。
+  手動執行 `cargo` 時，請先設定 `$env:CARGO_TARGET_DIR`，或自行建立（不納入版本控制的）`.cargo/config.toml` 指定 `target-dir`。
 - `Cargo.lock` 固定 `parking_lot`、`parking_lot_core`、`libloading`、`webbrowser` 的舊版本：
   新版改用 `raw-dylib`，需要完整的 `dlltool` + `as`。**不要對這幾個套件執行 `cargo update`。**
 - `link/libshlwapi.a`（空檔）+ `build.rs`：`webbrowser` 會連結 shlwapi，所需函式其實已由 windows-targets 提供。

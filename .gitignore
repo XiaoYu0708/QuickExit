@@ -1,3 +1,5 @@
 /target
 /dist
 /config.toml
+# 本機專用（各自的編譯輸出路徑）
+/.cargo/config.toml
