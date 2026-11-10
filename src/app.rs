@@ -157,6 +157,13 @@ impl App {
         if !self.is_admin {
             ui.label(RichText::new("遊戲若以系統管理員身分執行，本程式也需要管理員權限才能點擊。").weak().small());
         }
+        let (events, vk) = engine::key_stats();
+        let last = if vk == 0 {
+            "—".to_string()
+        } else {
+            crate::hotkey::key_name(crate::hotkey::Trigger::Key(vk)).unwrap_or_else(|| format!("0x{vk:02X}"))
+        };
+        ui.label(RichText::new(format!("鍵盤監聽：已收到 {events} 次按鍵事件，最後按下：{last}")).weak().small());
     }
 
     fn hotkey_section(&mut self, ui: &mut egui::Ui) {
@@ -287,7 +294,8 @@ impl App {
         let lines = engine::logs();
         egui::ScrollArea::vertical()
             .id_salt("log")
-            .max_height(130.0)
+            .max_height(110.0)
+            .min_scrolled_height(110.0)
             .auto_shrink([false, true])
             .stick_to_bottom(true)
             .show(ui, |ui| {
@@ -363,6 +371,12 @@ impl eframe::App for App {
             });
         });
 
+        egui::TopBottomPanel::bottom("log").resizable(false).show(ctx, |ui| {
+            ui.add_space(4.0);
+            self.log_section(ui);
+            ui.add_space(4.0);
+        });
+
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 self.status_section(ui, ctx);
@@ -374,11 +388,11 @@ impl eframe::App for App {
                 section(ui, "喚出滑鼠", |ui| self.cursor_section(ui));
                 section(ui, "點擊", |ui| self.click_section(ui));
                 section(ui, "目標程式", |ui| self.target_section(ui));
-                section(ui, "", |ui| self.log_section(ui));
             });
         });
 
         self.apply_changes(ctx);
+        ctx.request_repaint_after(Duration::from_millis(300));
         if self.capturing.is_some() {
             // 切換到其他程式（例如回到遊戲）就取消錄製，避免把遊戲中的按鍵吃掉。
             // 用 Win32 前景視窗判斷，不用 egui 的 focused（實測不可靠，會導致一按就被取消）。

@@ -3,7 +3,8 @@
 
 use std::collections::VecDeque;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::io::Write;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Mutex, OnceLock, RwLock};
 
@@ -47,6 +48,9 @@ static TX: OnceLock<Sender<Action>> = OnceLock::new();
 /// 已觸發而尚未放開的按鍵（避免長按連發，並一併攔截放開事件）
 static DOWN: Mutex<[bool; 260]> = Mutex::new([false; 260]);
 static LOG: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+/// 診斷用：Hook 收到的鍵盤事件數與最後按下的鍵
+static KEY_EVENTS: AtomicU64 = AtomicU64::new(0);
+static LAST_VK: AtomicU32 = AtomicU32::new(0);
 static REPAINT: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
 /// 快捷鍵錄製：CAPTURING 為 true 時，下一個按鍵會被記錄到 CAPTURED
@@ -62,9 +66,15 @@ fn now() -> String {
     format!("{:02}:{:02}:{:02}", st.wHour, st.wMinute, st.wSecond)
 }
 
+/// 寫入紀錄（畫面 + exe 旁的 QuickExit.log）。不可在 Hook 回呼中呼叫。
 pub fn log(msg: impl Into<String>) {
+    let line = format!("[{}] {}", now(), msg.into());
+    let path = config::config_path().with_file_name("QuickExit.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
+    }
     let mut l = LOG.lock().unwrap();
-    l.push_back(format!("[{}] {}", now(), msg.into()));
+    l.push_back(line);
     while l.len() > 200 {
         l.pop_front();
     }
@@ -74,6 +84,11 @@ pub fn log(msg: impl Into<String>) {
 
 pub fn logs() -> Vec<String> {
     LOG.lock().unwrap().iter().cloned().collect()
+}
+
+/// (鍵盤事件總數, 最後按下的虛擬鍵碼)
+pub fn key_stats() -> (u64, u16) {
+    (KEY_EVENTS.load(Ordering::Relaxed), LAST_VK.load(Ordering::Relaxed) as u16)
 }
 
 pub fn clear_logs() {
@@ -149,6 +164,43 @@ pub fn enabled() -> bool {
 pub fn start_capture() {
     *CAPTURED.lock().unwrap() = None;
     CAPTURING.store(true, Ordering::SeqCst);
+    std::thread::spawn(poll_capture);
+}
+
+/// 備援的錄製方式：直接輪詢鍵盤狀態（不依賴 Hook）。
+/// 錄製時本程式視窗在前景，按鍵只會送到自己，不吃掉也沒關係。
+fn poll_capture() {
+    // 候選按鍵：可命名的非修飾鍵（不含滑鼠左右鍵），加上滑鼠中鍵 / 側鍵
+    let mut candidates: Vec<(u16, Trigger)> = (0x07u16..=0xFE)
+        .filter(|&vk| !hotkey::is_modifier(vk))
+        .filter_map(|vk| hotkey::key_name(Trigger::Key(vk)).map(|_| (vk, Trigger::Key(vk))))
+        .collect();
+    candidates.push((0x04, Trigger::MouseMiddle));
+    candidates.push((0x05, Trigger::MouseX1));
+    candidates.push((0x06, Trigger::MouseX2));
+
+    // 開始時已經按著的鍵不算，必須「放開後再按下」
+    let mut was_down: Vec<bool> = candidates.iter().map(|&(vk, _)| win::key_is_down(vk)).collect();
+    while CAPTURING.load(Ordering::SeqCst) {
+        for (i, &(vk, t)) in candidates.iter().enumerate() {
+            let down = win::key_is_down(vk);
+            if down && !was_down[i] {
+                let result = if vk == hotkey::VK_ESCAPE {
+                    None
+                } else {
+                    hotkey::format_combo(hotkey::current_modifiers(), t)
+                };
+                // 用 swap 確保只有一條路徑（Hook 或輪詢）寫入結果
+                if CAPTURING.swap(false, Ordering::SeqCst) {
+                    *CAPTURED.lock().unwrap() = Some(result);
+                    repaint();
+                }
+                return;
+            }
+            was_down[i] = down;
+        }
+        win::sleep_ms(10);
+    }
 }
 
 pub fn cancel_capture() {
@@ -190,6 +242,10 @@ fn handle_input(input: Trigger, down: bool) -> bool {
         return true; // 長按的重複事件
     }
 
+    // debug 自我測試：停用 Hook 錄製，只測輪詢備援
+    if cfg!(debug_assertions) && CAPTURING.load(Ordering::SeqCst) && std::env::var_os("QUICKEXIT_SELFTEST_POLL").is_some() {
+        return false;
+    }
     if CAPTURING.load(Ordering::SeqCst) {
         if let Trigger::Key(vk) = input {
             if hotkey::is_modifier(vk) {
@@ -204,9 +260,11 @@ fn handle_input(input: Trigger, down: bool) -> bool {
                 None => return true, // 不支援的按鍵：吃掉，繼續等
             }
         };
-        CAPTURING.store(false, Ordering::SeqCst);
-        *CAPTURED.lock().unwrap() = Some(result);
+        if CAPTURING.swap(false, Ordering::SeqCst) {
+            *CAPTURED.lock().unwrap() = Some(result);
+        }
         pressed[idx] = true;
+        drop(pressed);
         repaint();
         return true;
     }
@@ -234,6 +292,10 @@ fn handle_input(input: Trigger, down: bool) -> bool {
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
+        KEY_EVENTS.fetch_add(1, Ordering::Relaxed);
+        if wparam as u32 == WM_KEYDOWN || wparam as u32 == WM_SYSKEYDOWN {
+            LAST_VK.store(kb.vkCode, Ordering::Relaxed);
+        }
         if kb.dwExtraInfo != win::INJECT_TAG {
             let msg = wparam as u32;
             let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
@@ -404,5 +466,7 @@ pub fn start(cfg: Config) -> Result<(), String> {
             DispatchMessageW(&msg);
         }
     });
-    ready_rx.recv().map_err(|_| "監聽執行緒異常結束".to_string())?
+    ready_rx.recv().map_err(|_| "監聽執行緒異常結束".to_string())??;
+    log(format!("鍵盤/滑鼠監聽已啟動（{}）", if win::is_admin() { "系統管理員" } else { "一般使用者" }));
+    Ok(())
 }
