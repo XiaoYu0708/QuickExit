@@ -30,6 +30,16 @@ if (-not $targetDir) {
     }
 }
 
+# Strip local paths (user name, project folder) from the exe's embedded panic/source locations
+$remap = @()
+foreach ($p in @($env:USERPROFILE, $targetDir, $PSScriptRoot)) {
+    if ($p) {
+        $remap += "--remap-path-prefix=$p=~"
+        $remap += "--remap-path-prefix=$($p -replace '\\', '/')=~"
+    }
+}
+$env:RUSTFLAGS = (@($env:RUSTFLAGS) + $remap | Where-Object { $_ }) -join ' '
+
 & $cargo test
 if ($LASTEXITCODE -ne 0) { throw 'tests failed' }
 & $cargo build --release

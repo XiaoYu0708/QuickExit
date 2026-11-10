@@ -1,6 +1,6 @@
 [package]
 name = "quick-exit"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 description = "遊戲副本退出快捷鍵：按自訂快捷鍵自動喚出滑鼠並點擊畫面右上角的退出按鈕"
 publish = false
