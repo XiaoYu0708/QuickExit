@@ -13,7 +13,7 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage, HC_ACTION,
-    KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MB_ICONHAND, MB_OK, MSG, MSLLHOOKSTRUCT,
+    KBDLLHOOKSTRUCT, MB_ICONHAND, MB_OK, MSG, MSLLHOOKSTRUCT,
     WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_SYSKEYDOWN,
     WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
@@ -234,7 +234,7 @@ fn handle_input(input: Trigger, down: bool) -> bool {
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let kb = &*(lparam as *const KBDLLHOOKSTRUCT);
-        if kb.flags & LLKHF_INJECTED == 0 {
+        if kb.dwExtraInfo != win::INJECT_TAG {
             let msg = wparam as u32;
             let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
             let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
@@ -249,7 +249,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let ms = &*(lparam as *const MSLLHOOKSTRUCT);
-        if ms.flags & LLMHF_INJECTED == 0 {
+        if ms.dwExtraInfo != win::INJECT_TAG {
             let xbtn = || if (ms.mouseData >> 16) & 0xFFFF == 1 { Trigger::MouseX1 } else { Trigger::MouseX2 };
             let event = match wparam as u32 {
                 WM_MBUTTONDOWN => Some((Trigger::MouseMiddle, true)),

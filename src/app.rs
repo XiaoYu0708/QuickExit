@@ -15,6 +15,15 @@ enum Field {
     Calibrate,
 }
 
+impl Field {
+    fn label(self) -> &'static str {
+        match self {
+            Field::Exit => "自動退出",
+            Field::Calibrate => "校正按鈕位置",
+        }
+    }
+}
+
 pub struct App {
     /// 畫面上正在編輯的設定
     draft: Config,
@@ -28,6 +37,8 @@ pub struct App {
     saved_at: Option<Instant>,
     is_admin: bool,
     config_path: String,
+    /// debug 版自我測試（環境變數 QUICKEXIT_SELFTEST=1）
+    selftest: Option<(Instant, bool)>,
 }
 
 impl App {
@@ -43,6 +54,8 @@ impl App {
             saved_at: None,
             is_admin: win::is_admin(),
             config_path: config::config_path().display().to_string(),
+            selftest: (cfg!(debug_assertions) && std::env::var_os("QUICKEXIT_SELFTEST").is_some())
+                .then(|| (Instant::now(), false)),
         }
     }
 
@@ -59,11 +72,15 @@ impl App {
         if let Some(field) = self.capturing {
             if let Some(result) = engine::take_capture() {
                 self.capturing = None;
-                if let Some(s) = result {
-                    match field {
-                        Field::Exit => self.draft.hotkeys.exit = s,
-                        Field::Calibrate => self.draft.hotkeys.calibrate_exit = s,
+                match result {
+                    Some(s) => {
+                        engine::log(format!("{}快捷鍵已設定為 {s}", field.label()));
+                        match field {
+                            Field::Exit => self.draft.hotkeys.exit = s,
+                            Field::Calibrate => self.draft.hotkeys.calibrate_exit = s,
+                        }
                     }
+                    None => engine::log("已取消錄製快捷鍵"),
                 }
             }
         }
@@ -106,9 +123,11 @@ impl App {
             if active {
                 engine::cancel_capture();
                 self.capturing = None;
+                engine::log("已取消錄製快捷鍵");
             } else {
                 engine::start_capture();
                 self.capturing = Some(field);
+                engine::log(format!("請按下要設定為「{}」的按鍵…", field.label()));
             }
         }
     }
@@ -282,6 +301,37 @@ impl App {
     }
 }
 
+impl App {
+    /// 自我測試：進入錄製 → 模擬外部按下 F24 → 檢查是否錄到
+    fn run_selftest(&mut self, ctx: &egui::Context) {
+        let Some((t0, sent)) = self.selftest.as_mut() else { return };
+        let ms = t0.elapsed().as_millis();
+        if ms < 500 {
+            if self.capturing.is_none() {
+                engine::start_capture();
+                self.capturing = Some(Field::Exit);
+            }
+        } else if !*sent && ms >= 1000 {
+            *sent = true;
+            std::thread::spawn(|| {
+                win::send_key_tagged(0x87, false, 0);
+                win::sleep_ms(30);
+                win::send_key_tagged(0x87, true, 0);
+            });
+        } else if ms >= 2500 {
+            println!("[selftest] RESULT exit={}", self.draft.hotkeys.exit);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        println!(
+            "[selftest] t={ms} focused={} capturing={} exit={}",
+            ctx.input(|i| i.focused),
+            self.capturing.is_some(),
+            self.draft.hotkeys.exit
+        );
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
+}
+
 fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
     egui::Frame::group(ui.style()).inner_margin(10.0).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -297,6 +347,7 @@ fn section(ui: &mut egui::Ui, title: &str, add: impl FnOnce(&mut egui::Ui)) {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.sync_from_engine();
+        self.run_selftest(ctx);
 
         egui::TopBottomPanel::bottom("footer").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -329,10 +380,12 @@ impl eframe::App for App {
 
         self.apply_changes(ctx);
         if self.capturing.is_some() {
-            // 視窗失去焦點（例如切回遊戲）就取消錄製，避免把遊戲中的按鍵吃掉
-            if !ctx.input(|i| i.focused) {
+            // 切換到其他程式（例如回到遊戲）就取消錄製，避免把遊戲中的按鍵吃掉。
+            // 用 Win32 前景視窗判斷，不用 egui 的 focused（實測不可靠，會導致一按就被取消）。
+            if !win::foreground_is_self() && self.selftest.is_none() {
                 engine::cancel_capture();
                 self.capturing = None;
+                engine::log("已取消錄製快捷鍵（切換到其他視窗）");
             }
             ctx.request_repaint_after(Duration::from_millis(100));
         }

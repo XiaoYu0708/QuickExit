@@ -74,8 +74,8 @@ impl Default for Config {
 impl Default for Hotkeys {
     fn default() -> Self {
         Self {
-            exit: "F9".into(),
-            calibrate_exit: "Shift+F9".into(),
+            exit: "F3".into(),
+            calibrate_exit: "Shift+F3".into(),
         }
     }
 }
@@ -173,7 +173,7 @@ run_as_admin = {admin}
 # 可用寫法：F1~F24、A~Z、0~9、Numpad0~9、Insert、Delete、Home、End、
 #           PageUp、PageDown、Pause、ScrollLock、Mouse3(中鍵)、Mouse4、Mouse5(側鍵)
 # 可加修飾鍵：Ctrl+ / Alt+ / Shift+ / Win+   例如 "Ctrl+Alt+Q"
-# 建議用單一按鍵（例如 F9 或 Mouse5），避免和遊戲內按住修飾鍵的功能衝突。
+# 建議用單一按鍵（例如 F3 或 Mouse5），避免和遊戲內按住修飾鍵的功能衝突。
 
 # 按下後自動點擊「退出」按鈕
 exit = {hk_exit}

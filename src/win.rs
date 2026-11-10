@@ -23,6 +23,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SW_SHOWNORMAL,
 };
 
+/// 本程式送出的模擬輸入都帶這個標記，Hook 據此只忽略自己送的事件
+/// （其他軟體——巨集鍵盤驅動、AutoHotkey、遠端桌面——送來的按鍵仍然要能觸發快捷鍵）
+pub const INJECT_TAG: usize = 0x5145_5854; // "QEXT"
+
 pub fn wide(s: &str) -> Vec<u16> {
     std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
 }
@@ -133,6 +137,11 @@ fn send(inputs: &[INPUT]) {
 
 /// 以掃描碼送出按鍵（DirectInput / Raw Input 遊戲也收得到）
 pub fn send_key(vk: u16, up: bool) {
+    send_key_tagged(vk, up, INJECT_TAG);
+}
+
+/// tag = 0 時送出「像外部軟體送的」按鍵（自我測試用）
+pub fn send_key_tagged(vk: u16, up: bool, tag: usize) {
     // MAPVK_VK_TO_VSC_EX = 4：延伸鍵會回傳 0xE0xx
     let sc = unsafe { MapVirtualKeyW(vk as u32, 4) };
     let mut flags = KEYEVENTF_SCANCODE;
@@ -150,7 +159,7 @@ pub fn send_key(vk: u16, up: bool) {
                 wScan: (sc & 0xFF) as u16,
                 dwFlags: flags,
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: tag,
             },
         },
     };
@@ -173,7 +182,7 @@ fn mouse_input(dx: i32, dy: i32, flags: u32) -> INPUT {
                 mouseData: 0,
                 dwFlags: flags,
                 time: 0,
-                dwExtraInfo: 0,
+                dwExtraInfo: INJECT_TAG,
             },
         },
     }
@@ -263,5 +272,19 @@ pub fn message_box(text: &str, title: &str, error: bool) {
     let (t, c) = (wide(text), wide(title));
     unsafe {
         MessageBoxW(null_mut(), t.as_ptr(), c.as_ptr(), MB_OK | if error { MB_ICONERROR } else { MB_ICONINFORMATION });
+    }
+}
+
+/// 前景視窗是否屬於本程式
+pub fn foreground_is_self() -> bool {
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        pid == GetCurrentProcessId()
     }
 }
