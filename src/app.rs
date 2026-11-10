@@ -164,6 +164,12 @@ impl App {
             crate::hotkey::key_name(crate::hotkey::Trigger::Key(vk)).unwrap_or_else(|| format!("0x{vk:02X}"))
         };
         ui.label(RichText::new(format!("鍵盤監聽：已收到 {events} 次按鍵事件，最後按下：{last}")).weak().small());
+        if engine::calibrating() {
+            ui.colored_label(
+                Color32::from_rgb(230, 160, 40),
+                "● 校正中：請在遊戲中用左鍵點一下退出按鈕（Esc 或點這個視窗取消）",
+            );
+        }
     }
 
     fn hotkey_section(&mut self, ui: &mut egui::Ui) {
@@ -258,7 +264,7 @@ impl App {
         });
         ui.label(
             RichText::new(format!(
-                "校正：在遊戲中叫出滑鼠，移到右上角退出按鈕上，按「{}」，聽到提示音就完成了。",
+                "校正：按「{}」後，在遊戲中叫出滑鼠，用左鍵點一下右上角的退出按鈕，聽到提示音就完成了。                 這次點擊不會傳給遊戲；Esc 取消，20 秒未點擊自動取消。",
                 d.hotkeys.calibrate_exit
             ))
             .weak()

@@ -14,9 +14,9 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage, HC_ACTION,
-    KBDLLHOOKSTRUCT, MB_ICONHAND, MB_OK, MSG, MSLLHOOKSTRUCT,
+    KBDLLHOOKSTRUCT, MB_ICONASTERISK, MB_ICONHAND, MB_OK, MSG, MSLLHOOKSTRUCT,
     WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
 };
 
 use crate::config::{self, Config, CursorMode};
@@ -26,7 +26,12 @@ use crate::win;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Action {
     Exit,
+    /// 按下校正快捷鍵：進入「等待左鍵點擊」狀態
     Calibrate,
+    /// 等待中按下了左鍵（螢幕座標）
+    CalibrateAt(i32, i32),
+    /// 等待中按了 Esc
+    CalibrateCancel,
 }
 
 struct Bindings {
@@ -55,6 +60,14 @@ static REPAINT: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
 /// 快捷鍵錄製：CAPTURING 為 true 時，下一個按鍵會被記錄到 CAPTURED
 static CAPTURING: AtomicBool = AtomicBool::new(false);
+
+/// 校正：等待使用者用左鍵點擊退出按鈕
+static CALIBRATING: AtomicBool = AtomicBool::new(false);
+/// 每次進入等待狀態遞增，用來判斷逾時計時器是否屬於目前這一次
+static CALIBRATE_ID: AtomicU64 = AtomicU64::new(0);
+/// 校正用的那次左鍵已攔截，對應的放開事件也要攔截
+static SWALLOW_LBUTTON_UP: AtomicBool = AtomicBool::new(false);
+const CALIBRATE_TIMEOUT_SECS: u64 = 20;
 /// Some(Some(s)) = 錄到 s；Some(None) = 使用者按 Esc 取消
 static CAPTURED: Mutex<Option<Option<String>>> = Mutex::new(None);
 
@@ -157,6 +170,11 @@ pub fn set_enabled(on: bool) {
 
 pub fn enabled() -> bool {
     ENABLED.load(Ordering::SeqCst)
+}
+
+/// 是否正在等待校正點擊
+pub fn calibrating() -> bool {
+    CALIBRATING.load(Ordering::SeqCst)
 }
 
 // ---------------------------------------------------------------- 快捷鍵錄製
@@ -269,6 +287,14 @@ fn handle_input(input: Trigger, down: bool) -> bool {
         return true;
     }
 
+    if input == Trigger::Key(hotkey::VK_ESCAPE) && CALIBRATING.swap(false, Ordering::SeqCst) {
+        pressed[idx] = true;
+        if let Some(tx) = TX.get() {
+            let _ = tx.send(Action::CalibrateCancel);
+        }
+        return true;
+    }
+
     if !ENABLED.load(Ordering::SeqCst) {
         return false;
     }
@@ -313,6 +339,18 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         let ms = &*(lparam as *const MSLLHOOKSTRUCT);
         if ms.dwExtraInfo != win::INJECT_TAG {
             let xbtn = || if (ms.mouseData >> 16) & 0xFFFF == 1 { Trigger::MouseX1 } else { Trigger::MouseX2 };
+            match wparam as u32 {
+                // 校正等待中的左鍵：記錄位置並攔截（不讓遊戲真的點到退出）
+                WM_LBUTTONDOWN if CALIBRATING.swap(false, Ordering::SeqCst) => {
+                    SWALLOW_LBUTTON_UP.store(true, Ordering::SeqCst);
+                    if let Some(tx) = TX.get() {
+                        let _ = tx.send(Action::CalibrateAt(ms.pt.x, ms.pt.y));
+                    }
+                    return 1;
+                }
+                WM_LBUTTONUP if SWALLOW_LBUTTON_UP.swap(false, Ordering::SeqCst) => return 1,
+                _ => {}
+            }
             let event = match wparam as u32 {
                 WM_MBUTTONDOWN => Some((Trigger::MouseMiddle, true)),
                 WM_MBUTTONUP => Some((Trigger::MouseMiddle, false)),
@@ -386,9 +424,29 @@ fn do_exit() {
     log(format!("已點擊退出按鈕（螢幕座標 {sx},{sy}，畫面 {}x{}）", area.width, area.height));
 }
 
-fn do_calibrate() {
-    let (Some(area), Some((x, y))) = (win::foreground_client(), win::cursor_pos()) else {
-        log("校正失敗：找不到前景視窗或滑鼠位置");
+fn calibrate_arm() {
+    let id = CALIBRATE_ID.fetch_add(1, Ordering::SeqCst) + 1;
+    CALIBRATING.store(true, Ordering::SeqCst);
+    log(format!(
+        "校正中：請在遊戲中叫出滑鼠，用左鍵點一下退出按鈕（這次點擊不會傳給遊戲；{CALIBRATE_TIMEOUT_SECS} 秒內有效，Esc 取消）"
+    ));
+    unsafe { MessageBeep(MB_ICONASTERISK) };
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(CALIBRATE_TIMEOUT_SECS));
+        if CALIBRATE_ID.load(Ordering::SeqCst) == id && CALIBRATING.swap(false, Ordering::SeqCst) {
+            log("校正已逾時取消");
+            beep(false);
+        }
+    });
+}
+
+fn do_calibrate(x: i32, y: i32) {
+    if win::foreground_is_self() {
+        log("已取消校正（點擊了 QuickExit 視窗）");
+        return;
+    }
+    let Some(area) = win::foreground_client() else {
+        log("校正失敗：找不到前景視窗");
         beep(false);
         return;
     };
@@ -444,7 +502,9 @@ pub fn start(cfg: Config) -> Result<(), String> {
         for action in rx {
             match action {
                 Action::Exit => do_exit(),
-                Action::Calibrate => do_calibrate(),
+                Action::Calibrate => calibrate_arm(),
+                Action::CalibrateAt(x, y) => do_calibrate(x, y),
+                Action::CalibrateCancel => log("已取消校正"),
             }
         }
     });
