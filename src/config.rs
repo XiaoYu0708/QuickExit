@@ -14,7 +14,6 @@ pub struct Config {
     pub cursor: CursorCfg,
     pub click: ClickCfg,
     pub exit_button: Point,
-    pub confirm_button: ConfirmButton,
 }
 
 #[derive(Deserialize, Clone, Debug, PartialEq)]
@@ -22,7 +21,6 @@ pub struct Config {
 pub struct Hotkeys {
     pub exit: String,
     pub calibrate_exit: String,
-    pub calibrate_confirm: String,
 }
 
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,15 +58,6 @@ pub struct Point {
     pub y: f64,
 }
 
-#[derive(Deserialize, Clone, Debug, PartialEq)]
-#[serde(default)]
-pub struct ConfirmButton {
-    pub enabled: bool,
-    pub delay_ms: u64,
-    pub x: f64,
-    pub y: f64,
-}
-
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -78,7 +67,6 @@ impl Default for Config {
             cursor: CursorCfg::default(),
             click: ClickCfg::default(),
             exit_button: Point::default(),
-            confirm_button: ConfirmButton::default(),
         }
     }
 }
@@ -88,7 +76,6 @@ impl Default for Hotkeys {
         Self {
             exit: "F9".into(),
             calibrate_exit: "Shift+F9".into(),
-            calibrate_confirm: "Shift+F10".into(),
         }
     }
 }
@@ -118,17 +105,6 @@ impl Default for Point {
     /// 預設值取自 2000x1125 截圖中右上角「退出」圖示的位置
     fn default() -> Self {
         Self { x: 0.9800, y: 0.0340 }
-    }
-}
-
-impl Default for ConfirmButton {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            delay_ms: 500,
-            x: 0.5,
-            y: 0.5,
-        }
     }
 }
 
@@ -182,7 +158,7 @@ pub fn render(c: &Config) -> String {
     format!(
         r#"# ================================================================
 #  QuickExit 設定檔
-#  修改後存檔即可，程式會自動重新載入（不用重開）。
+#  建議直接在程式視窗裡設定；手動修改請先關閉程式再存檔。
 # ================================================================
 
 # 只有當這個程式在前景時快捷鍵才會生效，例如 "game.exe"。
@@ -203,8 +179,6 @@ run_as_admin = {admin}
 exit = {hk_exit}
 # 校正退出按鈕位置：先在遊戲內叫出滑鼠，把滑鼠移到退出按鈕上，再按這個鍵
 calibrate_exit = {hk_cal}
-# 校正「確認」按鈕位置（如果退出後會跳出確認視窗），用法同上，校正後會自動啟用
-calibrate_confirm = {hk_conf}
 
 [cursor]
 # 遊戲中要怎樣叫出滑鼠：
@@ -233,19 +207,11 @@ restore_cursor = {restore}
 x = {ex:.4}
 y = {ey:.4}
 
-# 點完退出後若會跳出確認視窗，可在這裡設定第二次點擊
-[confirm_button]
-enabled = {cen}
-# 點完退出後等多久（毫秒）再點確認
-delay_ms = {cdelay}
-x = {cx:.4}
-y = {cy:.4}
 "#,
         target = q(&c.target_process),
         admin = c.run_as_admin,
         hk_exit = q(&c.hotkeys.exit),
         hk_cal = q(&c.hotkeys.calibrate_exit),
-        hk_conf = q(&c.hotkeys.calibrate_confirm),
         mode = q(c.cursor.mode.as_str()),
         ckey = q(&c.cursor.key),
         reveal = c.cursor.reveal_delay_ms,
@@ -255,10 +221,6 @@ y = {cy:.4}
         restore = c.click.restore_cursor,
         ex = c.exit_button.x,
         ey = c.exit_button.y,
-        cen = c.confirm_button.enabled,
-        cdelay = c.confirm_button.delay_ms,
-        cx = c.confirm_button.x,
-        cy = c.confirm_button.y,
     )
 }
 
@@ -278,8 +240,18 @@ mod tests {
         c.target_process = "遊戲 \"測試\".exe".into();
         c.cursor.mode = CursorMode::Tap;
         c.exit_button = Point { x: 0.1234, y: 0.5678 };
-        c.confirm_button.enabled = true;
         assert_eq!(parse(&render(&c)).unwrap(), c);
+    }
+
+    #[test]
+    fn old_v010_config_still_loads() {
+        let c = parse("[hotkeys]
+calibrate_confirm = \"Shift+F10\"
+[confirm_button]
+enabled = true
+x = 0.5
+").unwrap();
+        assert_eq!(c.hotkeys, Hotkeys::default());
     }
 
     #[test]

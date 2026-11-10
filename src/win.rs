@@ -224,3 +224,44 @@ pub fn relaunch_as_admin() -> bool {
     };
     r as isize > 32
 }
+
+// ---------------------------------------------------------------- 單一執行個體 / 訊息框
+
+static INSTANCE_MUTEX: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+const INSTANCE_NAME: &str = r"Local\QuickExit_SingleInstance";
+
+/// 取得單一執行個體鎖；已經有其他 QuickExit 在執行時回傳 false
+pub fn acquire_single_instance() -> bool {
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    let name = wide(INSTANCE_NAME);
+    unsafe {
+        let h = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+        if h.is_null() {
+            return true; // 建立失敗就不限制
+        }
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            CloseHandle(h);
+            return false;
+        }
+        *INSTANCE_MUTEX.lock().unwrap() = h as usize;
+    }
+    true
+}
+
+/// 釋放單一執行個體鎖（以管理員身分重新啟動前呼叫，讓新的程式能啟動）
+pub fn release_single_instance() {
+    let mut h = INSTANCE_MUTEX.lock().unwrap();
+    if *h != 0 {
+        unsafe { CloseHandle(*h as _) };
+        *h = 0;
+    }
+}
+
+pub fn message_box(text: &str, title: &str, error: bool) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK};
+    let (t, c) = (wide(text), wide(title));
+    unsafe {
+        MessageBoxW(null_mut(), t.as_ptr(), c.as_ptr(), MB_OK | if error { MB_ICONERROR } else { MB_ICONINFORMATION });
+    }
+}

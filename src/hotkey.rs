@@ -1,10 +1,11 @@
-//! 快捷鍵字串解析，例如 "F9"、"Shift+F9"、"Ctrl+Alt+Q"、"Mouse4"。
+//! 快捷鍵字串解析與產生，例如 "F9"、"Shift+F9"、"Ctrl+Alt+Q"、"Mouse5"。
 
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
 
 pub const VK_SHIFT: u16 = 0x10;
 pub const VK_CONTROL: u16 = 0x11;
 pub const VK_MENU: u16 = 0x12; // Alt
+pub const VK_ESCAPE: u16 = 0x1B;
 pub const VK_LWIN: u16 = 0x5B;
 pub const VK_RWIN: u16 = 0x5C;
 pub const VK_LSHIFT: u16 = 0xA0;
@@ -32,114 +33,146 @@ pub struct Hotkey {
     pub text: String,
 }
 
-/// 修飾鍵類別（用來判斷「觸發鍵本身就是修飾鍵」的情況）
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ModKind {
-    Ctrl,
-    Alt,
-    Shift,
-    Win,
-}
+/// 具名按鍵表：同一個鍵碼的第一個名稱是「正式名稱」，其餘是別名
+const NAMED_KEYS: &[(&str, u16)] = &[
+    ("Ctrl", VK_CONTROL),
+    ("Control", VK_CONTROL),
+    ("LCtrl", VK_LCONTROL),
+    ("LControl", VK_LCONTROL),
+    ("RCtrl", VK_RCONTROL),
+    ("RControl", VK_RCONTROL),
+    ("Alt", VK_MENU),
+    ("LAlt", VK_LMENU),
+    ("RAlt", VK_RMENU),
+    ("Shift", VK_SHIFT),
+    ("LShift", VK_LSHIFT),
+    ("RShift", VK_RSHIFT),
+    ("LWin", VK_LWIN),
+    ("Win", VK_LWIN),
+    ("RWin", VK_RWIN),
+    ("Space", 0x20),
+    ("Tab", 0x09),
+    ("Enter", 0x0D),
+    ("Return", 0x0D),
+    ("Esc", VK_ESCAPE),
+    ("Escape", VK_ESCAPE),
+    ("Backspace", 0x08),
+    ("Insert", 0x2D),
+    ("Ins", 0x2D),
+    ("Delete", 0x2E),
+    ("Del", 0x2E),
+    ("Home", 0x24),
+    ("End", 0x23),
+    ("PageUp", 0x21),
+    ("PgUp", 0x21),
+    ("PageDown", 0x22),
+    ("PgDn", 0x22),
+    ("Left", 0x25),
+    ("Up", 0x26),
+    ("Right", 0x27),
+    ("Down", 0x28),
+    ("Pause", 0x13),
+    ("ScrollLock", 0x91),
+    ("CapsLock", 0x14),
+    ("PrintScreen", 0x2C),
+    ("NumLock", 0x90),
+    ("NumMultiply", 0x6A),
+    ("Multiply", 0x6A),
+    ("NumAdd", 0x6B),
+    ("Add", 0x6B),
+    ("NumSubtract", 0x6D),
+    ("Subtract", 0x6D),
+    ("NumDecimal", 0x6E),
+    ("Decimal", 0x6E),
+    ("NumDivide", 0x6F),
+    ("Divide", 0x6F),
+    (";", 0xBA),
+    ("Semicolon", 0xBA),
+    ("=", 0xBB),
+    ("Equals", 0xBB),
+    (",", 0xBC),
+    ("Comma", 0xBC),
+    ("-", 0xBD),
+    ("Minus", 0xBD),
+    (".", 0xBE),
+    ("Period", 0xBE),
+    ("/", 0xBF),
+    ("Slash", 0xBF),
+    ("`", 0xC0),
+    ("Grave", 0xC0),
+    ("Backtick", 0xC0),
+    ("[", 0xDB),
+    ("LBracket", 0xDB),
+    ("\\", 0xDC),
+    ("Backslash", 0xDC),
+    ("]", 0xDD),
+    ("RBracket", 0xDD),
+    ("'", 0xDE),
+    ("Quote", 0xDE),
+];
 
-fn mod_kind(vk: u16) -> Option<ModKind> {
-    match vk {
-        VK_CONTROL | VK_LCONTROL | VK_RCONTROL => Some(ModKind::Ctrl),
-        VK_MENU | VK_LMENU | VK_RMENU => Some(ModKind::Alt),
-        VK_SHIFT | VK_LSHIFT | VK_RSHIFT => Some(ModKind::Shift),
-        VK_LWIN | VK_RWIN => Some(ModKind::Win),
-        _ => None,
-    }
-}
+const NAMED_MOUSE: &[(&str, Trigger)] = &[
+    ("Mouse3", Trigger::MouseMiddle),
+    ("MButton", Trigger::MouseMiddle),
+    ("Middle", Trigger::MouseMiddle),
+    ("Mouse4", Trigger::MouseX1),
+    ("XButton1", Trigger::MouseX1),
+    ("Mouse5", Trigger::MouseX2),
+    ("XButton2", Trigger::MouseX2),
+];
 
 /// 解析單一按鍵名稱（不含修飾鍵組合）
 pub fn parse_key(name: &str) -> Option<Trigger> {
     let n = name.trim().to_ascii_lowercase();
-    let k = |vk: u16| Some(Trigger::Key(vk));
 
-    // F1 ~ F24
-    if let Some(num) = n.strip_prefix('f') {
-        if let Ok(i) = num.parse::<u16>() {
-            if (1..=24).contains(&i) {
-                return k(0x70 + i - 1);
-            }
+    if let Some(i) = n.strip_prefix('f').and_then(|s| s.parse::<u16>().ok()) {
+        if (1..=24).contains(&i) {
+            return Some(Trigger::Key(0x70 + i - 1));
         }
     }
-    // Numpad0 ~ Numpad9
     for prefix in ["numpad", "num"] {
-        if let Some(num) = n.strip_prefix(prefix) {
-            if let Ok(i) = num.parse::<u16>() {
-                if i <= 9 {
-                    return k(0x60 + i);
-                }
+        if let Some(i) = n.strip_prefix(prefix).and_then(|s| s.parse::<u16>().ok()) {
+            if i <= 9 {
+                return Some(Trigger::Key(0x60 + i));
             }
         }
     }
-    // 單一字母或數字
     if n.len() == 1 {
         let c = n.as_bytes()[0];
         if c.is_ascii_lowercase() {
-            return k(c.to_ascii_uppercase() as u16);
+            return Some(Trigger::Key(c.to_ascii_uppercase() as u16));
         }
         if c.is_ascii_digit() {
-            return k(c as u16);
+            return Some(Trigger::Key(c as u16));
         }
     }
+    NAMED_KEYS
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(&n))
+        .map(|&(_, vk)| Trigger::Key(vk))
+        .or_else(|| NAMED_MOUSE.iter().find(|(k, _)| k.eq_ignore_ascii_case(&n)).map(|&(_, t)| t))
+}
 
-    match n.as_str() {
-        "ctrl" | "control" => k(VK_CONTROL),
-        "lctrl" | "lcontrol" => k(VK_LCONTROL),
-        "rctrl" | "rcontrol" => k(VK_RCONTROL),
-        "alt" => k(VK_MENU),
-        "lalt" => k(VK_LMENU),
-        "ralt" => k(VK_RMENU),
-        "shift" => k(VK_SHIFT),
-        "lshift" => k(VK_LSHIFT),
-        "rshift" => k(VK_RSHIFT),
-        "win" | "lwin" => k(VK_LWIN),
-        "rwin" => k(VK_RWIN),
-
-        "space" => k(0x20),
-        "tab" => k(0x09),
-        "enter" | "return" => k(0x0D),
-        "esc" | "escape" => k(0x1B),
-        "backspace" => k(0x08),
-        "insert" | "ins" => k(0x2D),
-        "delete" | "del" => k(0x2E),
-        "home" => k(0x24),
-        "end" => k(0x23),
-        "pageup" | "pgup" => k(0x21),
-        "pagedown" | "pgdn" => k(0x22),
-        "left" => k(0x25),
-        "up" => k(0x26),
-        "right" => k(0x27),
-        "down" => k(0x28),
-        "pause" => k(0x13),
-        "scrolllock" => k(0x91),
-        "capslock" => k(0x14),
-        "printscreen" => k(0x2C),
-        "numlock" => k(0x90),
-        "multiply" | "nummultiply" => k(0x6A),
-        "add" | "numadd" => k(0x6B),
-        "subtract" | "numsubtract" => k(0x6D),
-        "decimal" | "numdecimal" => k(0x6E),
-        "divide" | "numdivide" => k(0x6F),
-        ";" | "semicolon" => k(0xBA),
-        "=" | "equals" => k(0xBB),
-        "," | "comma" => k(0xBC),
-        "-" | "minus" => k(0xBD),
-        "." | "period" => k(0xBE),
-        "/" | "slash" => k(0xBF),
-        "`" | "grave" | "backtick" => k(0xC0),
-        "[" | "lbracket" => k(0xDB),
-        "\\" | "backslash" => k(0xDC),
-        "]" | "rbracket" => k(0xDD),
-        "'" | "quote" => k(0xDE),
-
-        "mbutton" | "middle" | "mouse3" => Some(Trigger::MouseMiddle),
-        "xbutton1" | "mouse4" => Some(Trigger::MouseX1),
-        "xbutton2" | "mouse5" => Some(Trigger::MouseX2),
-        _ => None,
+/// 按鍵的正式名稱（parse_key 的反向）
+pub fn key_name(t: Trigger) -> Option<String> {
+    let vk = match t {
+        Trigger::Key(vk) => vk,
+        mouse => return NAMED_MOUSE.iter().find(|(_, m)| *m == mouse).map(|(n, _)| n.to_string()),
+    };
+    match vk {
+        0x70..=0x87 => Some(format!("F{}", vk - 0x70 + 1)),
+        0x60..=0x69 => Some(format!("Numpad{}", vk - 0x60)),
+        0x30..=0x39 | 0x41..=0x5A => Some((vk as u8 as char).to_string()),
+        _ => NAMED_KEYS.iter().find(|(_, v)| *v == vk).map(|(n, _)| n.to_string()),
     }
+}
+
+pub fn is_modifier(vk: u16) -> bool {
+    matches!(
+        vk,
+        VK_CONTROL | VK_LCONTROL | VK_RCONTROL | VK_MENU | VK_LMENU | VK_RMENU | VK_SHIFT | VK_LSHIFT
+            | VK_RSHIFT | VK_LWIN | VK_RWIN
+    )
 }
 
 /// 解析快捷鍵組合，例如 "Ctrl+Alt+F9"
@@ -152,7 +185,6 @@ pub fn parse_hotkey(s: &str) -> Result<Hotkey, String> {
     if parts.iter().any(|p| p.is_empty()) {
         return Err(format!("快捷鍵格式錯誤：\"{text}\""));
     }
-
     let (last, mods) = parts.split_last().unwrap();
     let mut hk = Hotkey {
         ctrl: false,
@@ -178,8 +210,29 @@ fn is_down(vk: u16) -> bool {
     unsafe { GetAsyncKeyState(vk as i32) < 0 }
 }
 
+/// 目前實體按住的修飾鍵 (ctrl, alt, shift, win)
+pub fn current_modifiers() -> (bool, bool, bool, bool) {
+    (
+        is_down(VK_CONTROL),
+        is_down(VK_MENU),
+        is_down(VK_SHIFT),
+        is_down(VK_LWIN) || is_down(VK_RWIN),
+    )
+}
+
+/// 依目前按住的修飾鍵＋觸發鍵組出快捷鍵字串（錄製快捷鍵用）
+pub fn format_combo(mods: (bool, bool, bool, bool), t: Trigger) -> Option<String> {
+    let mut s = String::new();
+    for (on, name) in [(mods.0, "Ctrl+"), (mods.1, "Alt+"), (mods.2, "Shift+"), (mods.3, "Win+")] {
+        if on {
+            s.push_str(name);
+        }
+    }
+    s.push_str(&key_name(t)?);
+    Some(s)
+}
+
 impl Hotkey {
-    /// 觸發鍵是否與輸入事件相符
     pub fn trigger_matches(&self, input: Trigger) -> bool {
         match (self.trigger, input) {
             (Trigger::Key(want), Trigger::Key(got)) => {
@@ -196,17 +249,15 @@ impl Hotkey {
         }
     }
 
+    pub fn same_combo(&self, other: &Hotkey) -> bool {
+        self.trigger == other.trigger
+            && (self.ctrl, self.alt, self.shift, self.win) == (other.ctrl, other.alt, other.shift, other.win)
+    }
+
     /// 目前實體按住的修飾鍵是否與設定完全相同
     pub fn modifiers_match(&self) -> bool {
-        let own = match self.trigger {
-            Trigger::Key(vk) => mod_kind(vk),
-            _ => None,
-        };
-        let check = |kind: ModKind, want: bool, actual: bool| own == Some(kind) || want == actual;
-        check(ModKind::Ctrl, self.ctrl, is_down(VK_CONTROL))
-            && check(ModKind::Alt, self.alt, is_down(VK_MENU))
-            && check(ModKind::Shift, self.shift, is_down(VK_SHIFT))
-            && check(ModKind::Win, self.win, is_down(VK_LWIN) || is_down(VK_RWIN))
+        let (c, a, s, w) = current_modifiers();
+        (self.ctrl, self.alt, self.shift, self.win) == (c, a, s, w)
     }
 }
 
@@ -245,10 +296,22 @@ mod tests {
     }
 
     #[test]
-    fn generic_modifier_matches_sides() {
-        let h = parse_hotkey("Ctrl").unwrap();
-        assert!(h.trigger_matches(Trigger::Key(VK_LCONTROL)));
-        assert!(h.trigger_matches(Trigger::Key(VK_RCONTROL)));
-        assert!(!h.trigger_matches(Trigger::Key(VK_LSHIFT)));
+    fn key_name_roundtrip() {
+        for vk in 0u16..=0xFF {
+            if let Some(name) = key_name(Trigger::Key(vk)) {
+                assert_eq!(parse_key(&name), Some(Trigger::Key(vk)), "vk {vk:#x} -> {name}");
+            }
+        }
+        for t in [Trigger::MouseMiddle, Trigger::MouseX1, Trigger::MouseX2] {
+            assert_eq!(parse_key(&key_name(t).unwrap()), Some(t));
+        }
+    }
+
+    #[test]
+    fn format_combo_parses_back() {
+        let s = format_combo((true, false, true, false), Trigger::Key(0x78)).unwrap();
+        assert_eq!(s, "Ctrl+Shift+F9");
+        let h = parse_hotkey(&s).unwrap();
+        assert!(h.ctrl && h.shift && !h.alt && !h.win);
     }
 }

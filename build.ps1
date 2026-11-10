@@ -15,7 +15,9 @@ if ($LASTEXITCODE -ne 0) { throw 'build failed' }
 $ErrorActionPreference = 'Stop'
 
 $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.+)"').Matches[0].Groups[1].Value
-$targetDir = (& $cargo metadata --format-version 1 --no-deps | ConvertFrom-Json).target_directory
+$targetDir = 'target'
+$m = Select-String -Path .cargo\config.toml -Pattern '^target-dir\s*=\s*"(.+)"' -ErrorAction SilentlyContinue
+if ($m) { $targetDir = $m.Matches[0].Groups[1].Value }
 $exe = Join-Path $targetDir 'release\QuickExit.exe'
 
 $name = "QuickExit-v$version"
