@@ -5,7 +5,7 @@ use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::ptr::null_mut;
 use std::time::Duration;
 
-use windows_sys::Win32::Foundation::{CloseHandle, HWND, POINT, RECT};
+use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HWND, POINT, RECT};
 use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -18,7 +18,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::Shell::{IsUserAnAdmin, ShellExecuteW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId,
+    GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowTextW, GetWindowThreadProcessId,
     SetCursorPos, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     SW_SHOWNORMAL,
 };
@@ -87,37 +87,53 @@ impl ClientArea {
 
 /// 取得視窗所屬程式的執行檔名稱（例如 "game.exe"）
 pub fn process_name(hwnd: HWND) -> Option<String> {
+    process_name_detailed(hwnd).ok()
+}
+
+/// 同 process_name，失敗時回傳原因（給診斷紀錄用）
+fn process_name_detailed(hwnd: HWND) -> Result<String, String> {
     unsafe {
         let mut pid = 0u32;
         GetWindowThreadProcessId(hwnd, &mut pid);
         if pid == 0 {
-            return None;
+            return Err(format!("查不到視窗的 PID（錯誤碼 {}）", GetLastError()));
         }
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if h.is_null() {
-            return None;
+            return Err(format!("無法開啟程式 PID {pid}（錯誤碼 {}）", GetLastError()));
         }
         let mut buf = [0u16; 1024];
         let mut len = buf.len() as u32;
         let ok = QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len);
+        let err = GetLastError();
         CloseHandle(h);
         if ok == 0 {
-            return None;
+            return Err(format!("無法查詢程式 PID {pid} 的名稱（錯誤碼 {err}）"));
         }
         let full = OsString::from_wide(&buf[..len as usize]);
         std::path::Path::new(&full)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
+            .ok_or_else(|| format!("程式 PID {pid} 的路徑沒有檔名"))
     }
 }
 
-pub fn foreground_process_name() -> Option<String> {
+fn window_title(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    let n = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+    String::from_utf16_lossy(&buf[..n.max(0) as usize])
+}
+
+/// 前景視窗的 (程式名稱, 視窗標題)；失敗時回傳原因
+pub fn foreground_process() -> Result<(String, String), String> {
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.is_null() {
-        None
-    } else {
-        process_name(hwnd)
+        return Err("目前沒有前景視窗（可能正在切換視窗）".into());
     }
+    let title = window_title(hwnd);
+    process_name_detailed(hwnd)
+        .map(|name| (name, title.clone()))
+        .map_err(|e| if title.is_empty() { e } else { format!("{e}，視窗「{title}」") })
 }
 
 pub fn cursor_pos() -> Option<(i32, i32)> {

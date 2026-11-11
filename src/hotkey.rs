@@ -254,10 +254,9 @@ impl Hotkey {
             && (self.ctrl, self.alt, self.shift, self.win) == (other.ctrl, other.alt, other.shift, other.win)
     }
 
-    /// 目前實體按住的修飾鍵是否與設定完全相同
-    pub fn modifiers_match(&self) -> bool {
-        let (c, a, s, w) = current_modifiers();
-        (self.ctrl, self.alt, self.shift, self.win) == (c, a, s, w)
+    /// 按住的修飾鍵 (ctrl, alt, shift, win) 是否與設定完全相同
+    pub fn modifiers_match(&self, mods: (bool, bool, bool, bool)) -> bool {
+        (self.ctrl, self.alt, self.shift, self.win) == mods
     }
 }
 

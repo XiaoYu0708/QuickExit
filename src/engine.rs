@@ -23,8 +23,10 @@ use crate::config::{self, Config, CursorMode};
 use crate::hotkey::{self, Hotkey, Trigger};
 use crate::win;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Action {
+    /// 按了快捷鍵卻沒觸發：寫入診斷紀錄（Hook 回呼中不能直接寫檔）
+    Miss(String),
     Exit,
     /// 按下校正快捷鍵：進入「等待左鍵點擊」狀態
     Calibrate,
@@ -50,8 +52,18 @@ static RUNTIME: RwLock<Option<Runtime>> = RwLock::new(None);
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 static ENABLED: AtomicBool = AtomicBool::new(true);
 static TX: OnceLock<Sender<Action>> = OnceLock::new();
-/// 已觸發而尚未放開的按鍵（避免長按連發，並一併攔截放開事件）
-static DOWN: Mutex<[bool; 260]> = Mutex::new([false; 260]);
+struct KeyState {
+    /// 已觸發而尚未放開的按鍵（避免長按連發，並一併攔截放開事件）
+    pressed: [bool; 260],
+    /// 實體按住中的按鍵（不論有沒有觸發），用來辨識自動連發
+    held: [bool; 260],
+    /// 最後一次按下事件的時間（毫秒，來自 Hook 事件）
+    last_down: [u32; 260],
+}
+static KEYS: Mutex<KeyState> =
+    Mutex::new(KeyState { pressed: [false; 260], held: [false; 260], last_down: [0; 260] });
+/// 鍵盤自動連發的間隔最長約 1 秒（初始延遲）；超過這個間隔還被當成按住，表示漏收了放開事件
+const MISSED_UP_GAP_MS: u32 = 1200;
 static LOG: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
 /// 診斷用：Hook 收到的鍵盤事件數與最後按下的鍵
 static KEY_EVENTS: AtomicU64 = AtomicU64::new(0);
@@ -242,21 +254,60 @@ fn input_index(t: Trigger) -> usize {
     }
 }
 
-fn target_matches(target: &str) -> bool {
-    target.is_empty()
-        || win::foreground_process_name()
-            .map(|n| n.to_lowercase() == target.to_lowercase())
-            .unwrap_or(false)
+/// 前景是否為目標程式；不是的話回傳原因
+fn target_check(target: &str) -> Result<(), String> {
+    if target.is_empty() {
+        return Ok(());
+    }
+    let (name, title) =
+        win::foreground_process().map_err(|e| format!("無法確認前景是不是 {target}：{e}"))?;
+    if name.to_lowercase() == target.to_lowercase() {
+        Ok(())
+    } else {
+        Err(format!("前景視窗是 {name}（「{title}」），不是目標程式 {target}"))
+    }
 }
 
-/// 回傳 true 表示攔截此事件（不傳給其他程式）
-fn handle_input(input: Trigger, down: bool) -> bool {
-    let idx = input_index(input);
-    let mut pressed = DOWN.lock().unwrap();
-    if !down {
-        return std::mem::replace(&mut pressed[idx], false);
+fn send(action: Action) {
+    if let Some(tx) = TX.get() {
+        let _ = tx.send(action);
     }
-    if pressed[idx] {
+}
+
+fn input_name(t: Trigger) -> String {
+    hotkey::key_name(t).unwrap_or_else(|| match t {
+        Trigger::Key(vk) => format!("按鍵 {vk:#04X}"),
+        other => format!("{other:?}"),
+    })
+}
+
+/// 回傳 true 表示攔截此事件（不傳給其他程式）。time 是事件時間（毫秒）。
+fn handle_input(input: Trigger, down: bool, time: u32) -> bool {
+    let idx = input_index(input);
+    let mut keys = KEYS.lock().unwrap();
+    if !down {
+        keys.held[idx] = false;
+        return std::mem::replace(&mut keys.pressed[idx], false);
+    }
+    let gap = time.wrapping_sub(keys.last_down[idx]);
+    keys.last_down[idx] = time;
+    // 滑鼠按鍵不會自動連發；鍵盤連發的間隔不會超過 MISSED_UP_GAP_MS
+    let is_key = matches!(input, Trigger::Key(_));
+    let repeat = is_key && std::mem::replace(&mut keys.held[idx], true) && gap <= MISSED_UP_GAP_MS;
+    keys.held[idx] = true;
+    // 連發的重複事件不重複記錄
+    let miss = |msg: String| {
+        if !repeat {
+            send(Action::Miss(format!("沒觸發：{msg}")));
+        }
+    };
+
+    if keys.pressed[idx] {
+        miss(format!(
+            "{} 被當成長按而略過（沒收到上一次的放開事件，距上次按下 {:.1} 秒）",
+            input_name(input),
+            gap as f64 / 1000.0
+        ));
         return true; // 長按的重複事件
     }
 
@@ -281,17 +332,15 @@ fn handle_input(input: Trigger, down: bool) -> bool {
         if CAPTURING.swap(false, Ordering::SeqCst) {
             *CAPTURED.lock().unwrap() = Some(result);
         }
-        pressed[idx] = true;
-        drop(pressed);
+        keys.pressed[idx] = true;
+        drop(keys);
         repaint();
         return true;
     }
 
     if input == Trigger::Key(hotkey::VK_ESCAPE) && CALIBRATING.swap(false, Ordering::SeqCst) {
-        pressed[idx] = true;
-        if let Some(tx) = TX.get() {
-            let _ = tx.send(Action::CalibrateCancel);
-        }
+        keys.pressed[idx] = true;
+        send(Action::CalibrateCancel);
         return true;
     }
 
@@ -299,19 +348,24 @@ fn handle_input(input: Trigger, down: bool) -> bool {
         return false;
     }
     let b = BINDINGS.read().unwrap();
-    let hit = b
-        .list
-        .iter()
-        .find(|(hk, _)| hk.trigger_matches(input) && hk.modifiers_match())
-        .map(|(_, a)| *a);
-    let Some(action) = hit else { return false };
-    if !target_matches(&b.target) {
+    let mods = hotkey::current_modifiers();
+    let hit = b.list.iter().find(|(hk, _)| hk.trigger_matches(input) && hk.modifiers_match(mods));
+    let Some((hk, action)) = hit else {
+        // 觸發鍵對了、修飾鍵不對：記下實際按的組合
+        let wanted: Vec<&str> =
+            b.list.iter().filter(|(hk, _)| hk.trigger_matches(input)).map(|(hk, _)| hk.text.as_str()).collect();
+        if !wanted.is_empty() {
+            let got = hotkey::format_combo(mods, input).unwrap_or_else(|| input_name(input));
+            miss(format!("按下的是 {got}，但設定是 {}（修飾鍵不符）", wanted.join(" / ")));
+        }
+        return false;
+    };
+    if let Err(reason) = target_check(&b.target) {
+        miss(format!("{}：{reason}", hk.text));
         return false;
     }
-    pressed[idx] = true;
-    if let Some(tx) = TX.get() {
-        let _ = tx.send(action);
-    }
+    keys.pressed[idx] = true;
+    send(action.clone());
     true
 }
 
@@ -326,7 +380,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             let msg = wparam as u32;
             let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
             let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
-            if (down || up) && handle_input(Trigger::Key(kb.vkCode as u16), down) {
+            if (down || up) && handle_input(Trigger::Key(kb.vkCode as u16), down, kb.time) {
                 return 1;
             }
         }
@@ -359,7 +413,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 _ => None,
             };
             if let Some((t, down)) = event {
-                if handle_input(t, down) {
+                if handle_input(t, down, ms.time) {
                     return 1;
                 }
             }
@@ -501,6 +555,7 @@ pub fn start(cfg: Config) -> Result<(), String> {
     std::thread::spawn(move || {
         for action in rx {
             match action {
+                Action::Miss(msg) => log(msg),
                 Action::Exit => do_exit(),
                 Action::Calibrate => calibrate_arm(),
                 Action::CalibrateAt(x, y) => do_calibrate(x, y),
